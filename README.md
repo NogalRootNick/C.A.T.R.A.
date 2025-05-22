@@ -1,5 +1,5 @@
 ## 🤖 NogalRootNick: Forjando el Futuro de la Robótica en la WRO
- - ¡Bienvenidos al repositorio oficial de NogalRootNick! Somos un equipo lleno de energía y pasión por la robótica, listos para conquistar los desafíos de la World Robot Olympiad (WRO). Aquí es donde la creatividad se une a la ingeniería, y cada línea de código es un paso más hacia la innovación.
+ - ¡Bienvenidos a NogalRootNick! Somos un equipo lleno de energía y pasión por la robótica, listos para conquistar los desafíos de la World Robot Olympiad (WRO). Aquí es donde la creatividad se une a la ingeniería, y cada línea de código es un paso más hacia la innovación.
 
 ## 🤝 ¿Quiénes Somos?
  - En NogalRootNick, no solo construimos robots; construimos sueños. Somos un grupo de jóvenes mentes brillantes, cada uno aportando su perspectiva única y habilidades complementarias. Nos enorgullece nuestra forma de trabajar: colaboramos estrechamente, donde cada engranaje ensamblado y cada programa escrito es el resultado de un esfuerzo conjunto y una comunicación constante. ¡Somos más que un equipo, somos una familia robótica!
