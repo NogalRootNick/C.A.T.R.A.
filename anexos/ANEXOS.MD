@@ -2,6 +2,6 @@
 
 <html>
 <body>
-<img src="https://files.fm/f/qds6y2tbsz">
+<img src="https://files.fm/down.php?i=qds6y2tbsz">
 </body>
 </html>
