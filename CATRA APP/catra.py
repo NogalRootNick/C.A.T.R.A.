@@ -14,7 +14,7 @@ import numpy as np
 ESP32_IP = '192.168.137.97'
 ESP32_PORT = 8888
 
-MAX_POINTS = 100
+MAX_POINTS = 500
 x_data = deque(maxlen=MAX_POINTS)
 y_data = deque(maxlen=MAX_POINTS)
 
