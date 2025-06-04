@@ -1,4 +1,4 @@
-// Incluye las librerías necesarias
+// librerías necesarias
 #include <ESP32Servo.h>      // Librería específica para servos en ESP32
 #include <Wire.h>            // Para comunicación I2C (usada por ambos sistemas)
 #include <Adafruit_VL53L0X.h> // Para el sensor de distancia VL53L0X
@@ -46,10 +46,10 @@ Adafruit_MPU6050 mpu;
 Servo myservo;
 
 // Sistema de Movimiento del Robot
-// TwoWire Wire1 = TwoWire(1); // No es necesario redeclarar, Wire1 ya está predefinido
+// TwoWire Wire1 = TwoWire(1);
 
 // NRF24L01
-// RF24 radio(NRF_CE_PIN, NRF_CSN_PIN, &radioSPI); // LÍNEA CORREGIDA ABAJO
+// RF24 radio(NRF_CE_PIN, NRF_CSN_PIN, &radioSPI);
 RF24 radio(NRF_CE_PIN, NRF_CSN_PIN); // Constructor estándar (CE, CSN). Usará el objeto SPI global.
                                      // La velocidad SPI será la definida por defecto en RF24.h (RF24_SPI_SPEED)
 // Ya no se declara: SPIClass radioSPI(HSPI);
@@ -86,7 +86,7 @@ const unsigned long LIDAR_OPERATING_DURATION_MS = 1500;
 unsigned long lidar_start_time = 0;
 
 /**
- * @brief Escribe un array de datos a un registro específico en el dispositivo I2C del controlador de motores.
+ * @brief array de datos de un registro específico en el dispositivo I2C del controlador de motores.
  */
 bool MotorController_WriteDataArray(uint8_t reg, uint8_t *val, unsigned int len) {
     Wire1.beginTransmission(MOTOR_CONTROLLER_I2C_ADDR);
