@@ -156,11 +156,6 @@ void setup() {
     Serial.println("NRF CE: " + String(NRF_CE_PIN) + ", CSN: " + String(NRF_CSN_PIN));
     Serial.println("HSPI SCLK: " + String(HSPI_SCLK_PIN) + ", MISO: " + String(HSPI_MISO_PIN) + ", MOSI: " + String(HSPI_MOSI_PIN));
     
-    // Configurar el objeto SPI global para usar los pines HSPI.
-    // La librería RF24 maneja el pin CSN (NRF_CSN_PIN) directamente.
-    // El cuarto parámetro de SPI.begin() (para SS/CS) aquí no es crítico para RF24,
-    // ya que RF24 controla NRF_CSN_PIN manualmente.
-    // Si se incluye, NRF_CSN_PIN podría ser una opción, o -1 si la API lo permite para indicar CS no gestionado por SPI.begin
     SPI.begin(HSPI_SCLK_PIN, HSPI_MISO_PIN, HSPI_MOSI_PIN); 
     // Alternativamente, si se necesita especificar el CS para el bus:
     // SPI.begin(HSPI_SCLK_PIN, HSPI_MISO_PIN, HSPI_MOSI_PIN, NRF_CSN_PIN);
