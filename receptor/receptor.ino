@@ -38,7 +38,7 @@ struct LidarDataPacket {
 // =======================================================
 // === NUEVA LÍNEA: UMBRAL DE DISTANCIA MÁXIMA PARA ENVIAR ===
 // =======================================================
-const uint16_t MAX_DISTANCE_MM = 150; // Las mediciones por encima de este valor NO se enviarán a Python.
+const uint16_t MAX_DISTANCE_MM = 225; // Las mediciones por encima de este valor NO se enviarán a Python.
                                      // Puedes ajustar este valor fácilmente para la competencia.
 
 
@@ -84,7 +84,7 @@ void setup() {
         radio.printDetails(); // ¡Muy útil para depurar!
 
         // **Configuración del NRF24L01 (¡DEBE COINCIDIR EXACTAMENTE CON EL TRANSMISOR!)**
-        radio.setChannel(115);          // Canal de comunicación
+        radio.setChannel(115);          // Canal de comunicaación
         radio.setPALevel(RF24_PA_LOW);  // Nivel de potencia (LOW para receptor es eficiente)
         radio.setDataRate(RF24_250KBPS); // Velocidad de datos
 
@@ -117,7 +117,7 @@ void loop() {
         // === INICIO DE LA LÓGICA DE FILTRADO Y MENSAJES DE DEPURACIÓN EXACTOS ===
         // =======================================================================
         if (receivedData.range_millimeter <= MAX_DISTANCE_MM) {
-            // Los datos están dentro del rango permitido (<= 150mm), procesar y enviar a Python
+            // Los datos están dentro del rango permitido (<= 150mm), procesar y enviar a Pythona
             String dataString = "X:" + String(receivedData.coord_x, 2) +
                                 ",Y:" + String(receivedData.coord_y, 2) + // Quitamos el espacio para consistencia
                                 ",Status:" + String(receivedData.range_status) +
