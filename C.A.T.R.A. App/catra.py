@@ -1,350 +1,451 @@
-import socket
-import threading
-import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import matplotlib.animation as animation
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import deque
-import re
-from PIL import Image, ImageTk, ImageDraw
-import numpy as np
 import os
+import threading
+import sys
+import serial
+import serial.tools.list_ports
+import re
+import time
+from PIL import Image, ImageTk
+import numpy as np
 import random
 
-ESP32_IP = '192.168.137.23'
-ESP32_PORT = 8888
+# Define los patrones de expresiones regulares
+x_pattern = re.compile(r"LIDAR COORD: X=([-+]?\d+\.?\d*)")
+y_pattern = re.compile(r"Y=([-+]?\d+\.?\d*)")
+temp_pattern = re.compile(r"Temp:\s*([-+]?\d+\.?\d*)")
+hum_pattern = re.compile(r"Hum:\s*([-+]?\d+\.?\d*)")
+pres_pattern = re.compile(r"Pres:\s*([-+]?\d+\.?\d*)")
+map_complete_pattern = re.compile(r"MAP_COMPLETE\s+(.+)")
 
-MAX_POINTS = 500
+# --- Serial Port Configuration ---
+SERIAL_PORT = 'AUTO'
+MANUAL_FALLBACK_PORT = 'COM3'
+BAUD_RATE = 9600
+MAX_POINTS_LIDAR = 500
+MAX_POINTS_SCATTER = 10 * 1000  # Increased for a more detailed map
+DATA_TIMEOUT_SECONDS = 2.0
 
-x_data = deque(maxlen=MAX_POINTS)
-y_data = deque(maxlen=MAX_POINTS)
+# Data collections
+x_data_scatter = deque(maxlen=MAX_POINTS_SCATTER)
+y_data_scatter = deque(maxlen=MAX_POINTS_SCATTER)
+x_data_stats = deque(maxlen=MAX_POINTS_LIDAR)
+y_data_stats = deque(maxlen=MAX_POINTS_LIDAR)
+temp_data = deque(maxlen=200)
+hum_data = deque(maxlen=200)
+pres_data = deque(maxlen=200)
 
-receiving_data = True
-
-first_data_received_flag = False
-
+plotting_active = True
 last_x_val = None
 last_y_val = None
+serial_status_var = None
+last_data_timestamp = time.time()
+data_source = "serial"  # New: 'serial' or 'simulation'
 
-fig = None
-ax = None
-line = None
+# Matplotlib objects
+fig_scatter, ax_scatter, line_scatter = None, None, None
+fig_stats, ax_stats, line_stats = None, None, None
+fig_sensors, ax_temp, ax_hum, ax_pres = None, None, None, None
+line_temp, line_hum, line_pres = None, None, None
+serial_connection = None
+current_displayed_map_path = None
 
-top_panel = None
-bottom_panel = None
+# Paleta de colores en hexadecimal para el nuevo diseño
+BG_COLOR_DARKEST = "#1f1f1f"
+PANEL_COLOR = "#2d2d2d"
+TEXT_COLOR = "#ffffff"
+MUTED_TEXT_COLOR = "#b0b0b0"
+ACCENT_BLUE = "#3498db"
+ACCENT_ORANGE = "#e67e22"
+GRID_COLOR = "#444444"
+BUTTON_BG_COLOR = "#3a3a3a"
+BUTTON_FG_COLOR = "#ffffff"
+LIDAR_POINT_COLOR = "#00ffff" # Cian para los puntos del LIDAR
+TEMP_LINE_COLOR = "#5dade2" # Azul claro
+HUM_LINE_COLOR = "#f5b041"  # Naranja
+PRES_LINE_COLOR = "#2ecc71" # Verde
 
-WHITE_BACKGROUND_COLOR = "#FFFFFF"
-
-CAPS = "plots_catra"
+CAPS = "catra_maps"
+MAP_PREVIEW_PATH = os.path.join(CAPS, "last_completed_map.png")
 
 if not os.path.exists(CAPS):
-    os.makedirs(CAPS)
+    try:
+        os.makedirs(CAPS)
+        print(f"Created directory: {CAPS}")
+    except OSError as e:
+        print(f"Error creating directory {CAPS}: {e}")
+        messagebox.showerror("Error de Directorio", f"No se pudo crear la carpeta para mapas '{CAPS}':\n{e}\n"
+                                                      "Asegúrese de tener permisos de escritura.")
 
-map_configurations = [
-    {
-        "name": "Mapa Área Cercana (0-200mm)",
-        "xlim": (-250, 250),
-        "ylim": (-250, 250),
-        "title": "Monitor LIDAR: Área Cercana (0-200mm)",
-        "point_color": '#1E90FF'
-    },
-    {
-        "name": "Mapa Área General (-1500-1500mm)",
-        "xlim": (-1500, 1500),
-        "ylim": (-1500, 1500),
-        "title": "Monitor LIDAR: Área General (-1500-1500mm)",
-        "point_color": '#FF4500'
-    },
-    {
-        "name": "Mapa Cuadrante Superior (0-1000mm)",
-        "xlim": (0, 1000),
-        "ylim": (0, 1000),
-        "title": "Monitor LIDAR: Cuadrante Superior (0-1000mm)",
-        "point_color": '#32CD32'
-    }
-]
-current_map_index = 0
-
-def setup_matplotlib_plot_config():
-    global fig, ax, line, current_map_index
-
-    config = map_configurations[current_map_index]
-
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('white')
-
-    ax.tick_params(axis='x', colors='black', labelsize=10)
-    ax.tick_params(axis='y', colors='black', labelsize=10)
-    ax.xaxis.label.set_color('black')
-    ax.yaxis.label.set_color('black')
-    ax.title.set_color('black')
-
-    ax.spines['left'].set_color('black')
-    ax.spines['bottom'].set_color('black')
+def configure_plot_style(ax, title, xlabel, ylabel):
+    ax.set_facecolor(PANEL_COLOR)
+    ax.tick_params(axis='x', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax.tick_params(axis='y', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax.xaxis.label.set_color(MUTED_TEXT_COLOR)
+    ax.yaxis.label.set_color(MUTED_TEXT_COLOR)
+    ax.title.set_color(TEXT_COLOR)
+    ax.spines['left'].set_color(GRID_COLOR)
+    ax.spines['bottom'].set_color(GRID_COLOR)
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
-    ax.spines['left'].set_linewidth(1.5)
-    ax.spines['bottom'].set_linewidth(1.5)
+    ax.spines['left'].set_linewidth(0.5)
+    ax.spines['bottom'].set_linewidth(0.5)
+    ax.grid(True, linestyle=':', alpha=0.5, color=GRID_COLOR, linewidth=0.5)
+    ax.set_title(title, fontsize=10, pad=5, loc='left')
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
 
-    ax.grid(True, linestyle=':', alpha=0.8, color='black', linewidth=0.7)
+def setup_stats_plot_config():
+    global fig_stats, ax_stats, line_stats
+    fig_stats = plt.Figure(figsize=(3, 3), dpi=100)  # Tamaño reducido del gráfico
+    ax_stats = fig_stats.add_subplot(111, polar=True)
+    fig_stats.patch.set_facecolor(PANEL_COLOR)
+    ax_stats.set_facecolor(PANEL_COLOR)
 
-    ax.set_xlim(config["xlim"][0], config["xlim"][1])
-    ax.set_ylim(config["ylim"][0], config["ylim"][1])
-    ax.set_aspect('equal', adjustable='box')
+    ax_stats.set_theta_zero_location('N')
+    ax_stats.set_theta_direction(-1)
+    ax_stats.set_ylim(0, 1000)  # Example range for stats plot
+    ax_stats.set_rticks(np.arange(0, 1001, 200))
+    ax_stats.set_rlabel_position(-22.5)
+    ax_stats.tick_params(axis='both', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_stats.grid(color=GRID_COLOR, linestyle=':', linewidth=0.5, alpha=0.5)
+    ax_stats.spines['polar'].set_color(GRID_COLOR)
+    ax_stats.set_title("LIDAR Position", fontsize=12, pad=10, color=TEXT_COLOR)
 
-    ax.set_title(config["title"], fontsize=18, color='black', pad=15)
-    ax.set_xlabel('Coordenada X (mm)', fontsize=12, color='black')
-    ax.set_ylabel('Coordenada Y (mm)', fontsize=12, color='black')
+    line_stats, = ax_stats.plot([], [], 'o', color=LIDAR_POINT_COLOR, markersize=3, alpha=0.7)
 
-    line.set_color(config["point_color"])
-    line.set_marker('o')
-    line.set_markersize(8)
-    line.set_linestyle('None')
-    line.set_alpha(0.9)
+def setup_scatter_plot_config():
+    global fig_scatter, ax_scatter, line_scatter
+    fig_scatter = plt.Figure(figsize=(8, 8), dpi=100)
+    ax_scatter = fig_scatter.add_subplot(111)
+    fig_scatter.patch.set_facecolor(PANEL_COLOR)
+    configure_plot_style(ax_scatter, "Real-Time Scatter Map", "X (mm)", "Y (mm)")
+    ax_scatter.set_aspect('equal', adjustable='box')
+    ax_scatter.set_xlim(-1500, 1500)
+    ax_scatter.set_ylim(-1500, 1500)
+    line_scatter, = ax_scatter.plot([], [], 'o', color=ACCENT_BLUE, markersize=2, alpha=0.5)
 
-def update_plot(_):
-    if receiving_data and line:
-        line.set_data(list(x_data), list(y_data))
-        fig.canvas.draw_idle()
+def setup_sensor_plots():
+    global fig_sensors, ax_temp, ax_hum, ax_pres, line_temp, line_hum, line_pres
+    fig_sensors, (ax_temp, ax_hum, ax_pres) = plt.subplots(3, 1, figsize=(4, 6), dpi=100)
+    fig_sensors.patch.set_facecolor(PANEL_COLOR)
+    
+    # Temperature Plot
+    ax_temp.set_facecolor(PANEL_COLOR)
+    ax_temp.tick_params(axis='x', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_temp.tick_params(axis='y', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_temp.title.set_color(TEXT_COLOR)
+    ax_temp.grid(True, linestyle=':', alpha=0.5, color=GRID_COLOR)
+    ax_temp.set_title("Temperature °C", loc='left', color=TEXT_COLOR)
+    line_temp, = ax_temp.plot([], [], color=TEMP_LINE_COLOR)
 
-        if x_data and y_data:
-            last_x_val.set(f"X: {x_data[-1]:.2f} mm")
-            last_y_val.set(f"Y: {y_data[-1]:.2f} mm")
-        else:
-            last_x_val.set("X: ---")
-            last_y_val.set("Y: ---")
+    # Humidity Plot
+    ax_hum.set_facecolor(PANEL_COLOR)
+    ax_hum.tick_params(axis='x', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_hum.tick_params(axis='y', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_hum.title.set_color(TEXT_COLOR)
+    ax_hum.grid(True, linestyle=':', alpha=0.5, color=GRID_COLOR)
+    ax_hum.set_title("Humidity (%)", loc='left', color=TEXT_COLOR)
+    line_hum, = ax_hum.plot([], [], color=HUM_LINE_COLOR)
 
-def receive_from_esp32():
-    global receiving_data, first_data_received_flag
-    print(f"Intentando conectar al ESP32 (Estación Base) en {ESP32_IP}:{ESP32_PORT}...")
+    # Pressure Plot
+    ax_pres.set_facecolor(PANEL_COLOR)
+    ax_pres.tick_params(axis='x', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_pres.tick_params(axis='y', colors=MUTED_TEXT_COLOR, labelsize=8)
+    ax_pres.title.set_color(TEXT_COLOR)
+    ax_pres.grid(True, linestyle=':', alpha=0.5, color=GRID_COLOR)
+    ax_pres.set_title("Atmospheric Pressure (kPa)", loc='left', color=TEXT_COLOR)
+    line_pres, = ax_pres.plot([], [], color=PRES_LINE_COLOR)
+
+    fig_sensors.tight_layout(pad=1.5)
+
+def display_map_preview():
+    global map_preview_label
+    if os.path.exists(MAP_PREVIEW_PATH):
+        try:
+            img = Image.open(MAP_PREVIEW_PATH)
+            w, h = map_preview_label.winfo_width() - 2, map_preview_label.winfo_height() - 2
+            if w > 0 and h > 0:
+                img.thumbnail((w, h), Image.Resampling.LANCZOS)
+                img_tk = ImageTk.PhotoImage(img)
+                map_preview_label.config(image=img_tk, text="")
+                map_preview_label.image = img_tk
+            else:
+                map_preview_label.config(text="Error al cargar el mapa: Tamaño de widget inválido.")
+                map_preview_label.image = None
+        except Exception as e:
+            map_preview_label.config(text=f"Error al cargar el mapa:\n{e}")
+            map_preview_label.image = None
+    else:
+        map_preview_label.config(text="No hay mapa previo guardado.")
+        map_preview_label.image = None
+
+def update_gui_elements():
+    global plotting_active
+    if plotting_active:
+        # Update LIDAR plots
+        if line_scatter and x_data_scatter and y_data_scatter:
+            line_scatter.set_data(list(x_data_scatter), list(y_data_scatter))
+            ax_scatter.relim()
+            ax_scatter.autoscale_view()
+            fig_scatter.canvas.draw_idle()
+
+        if line_stats and x_data_stats and y_data_stats:
+            r_vals = np.sqrt(np.array(x_data_stats)**2 + np.array(y_data_stats)**2)
+            theta_vals = np.arctan2(y_data_stats, x_data_stats)
+            line_stats.set_data(theta_vals, r_vals)
+            ax_stats.relim()
+            ax_stats.autoscale_view()
+            fig_stats.canvas.draw_idle()
+
+        # Update sensor plots
+        if line_temp:
+            line_temp.set_data(range(len(temp_data)), temp_data)
+            ax_temp.set_xlim(0, max(20, len(temp_data)))
+            ax_temp.relim()
+            ax_temp.autoscale_view(True, True, True)
+            fig_sensors.canvas.draw_idle()
+        
+        if line_hum:
+            line_hum.set_data(range(len(hum_data)), hum_data)
+            ax_hum.set_xlim(0, max(20, len(hum_data)))
+            ax_hum.relim()
+            ax_hum.autoscale_view(True, True, True)
+            fig_sensors.canvas.draw_idle()
+
+        if line_pres:
+            line_pres.set_data(range(len(pres_data)), pres_data)
+            ax_pres.set_xlim(0, max(20, len(pres_data)))
+            ax_pres.relim()
+            ax_pres.autoscale_view(True, True, True)
+            fig_sensors.canvas.draw_idle()
+
+        root.after(50, update_gui_elements)
+
+def find_arduino_port():
+    ports = serial.tools.list_ports.comports()
+    keywords = ["arduino", "usb-serial", "ch340", "ft232r", "usbmodem", "cp210x", "serial"]
+    for p in ports:
+        if any(keyword in p.description.lower() for keyword in keywords) or \
+           any(keyword in p.hwid.lower() for keyword in keywords):
+            return p.device
+    return None
+
+def setup_serial_connection():
+    global serial_connection, data_source
+    if serial_connection and serial_connection.is_open:
+        serial_status_var.set(f"Estado: Conectado a {serial_connection.port}")
+        data_source = "serial"
+        return True
+    
+    port_to_use = SERIAL_PORT
+    if port_to_use == 'AUTO':
+        port_to_use = find_arduino_port() or MANUAL_FALLBACK_PORT
+    
+    if not port_to_use:
+        serial_status_var.set("Estado: Error (No hay puerto válido)")
+        return False
+        
+    serial_status_var.set(f"Estado: Intentando conectar a {port_to_use}...")
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((ESP32_IP, ESP32_PORT))
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            print("Conectado al ESP32 (Estación Base).")
+        serial_connection = serial.Serial(port_to_use, BAUD_RATE, timeout=0.5)
+        serial_status_var.set(f"Estado: Conectado a {port_to_use}")
+        time.sleep(2)
+        serial_connection.reset_input_buffer()
+        data_source = "serial"
+        return True
+    except serial.SerialException as e:
+        serial_status_var.set(f"Estado: Desconectado ({e})")
+        messagebox.showerror("Error de Conexión Serial", f"No se pudo conectar al puerto serial:\n{e}")
+        return False
 
-            buffer_size = 4096
-            buffer = ""
+def receive_from_serial():
+    global plotting_active, serial_connection, last_data_timestamp, data_source
+    if not setup_serial_connection():
+        data_source = "simulation"
+        simulate_data()
+        serial_status_var.set("Estado: Sin Conexión Serial - Modo Simulación")
+        return
+        
+    while plotting_active and data_source == "serial":
+        try:
+            if serial_connection and serial_connection.is_open:
+                if serial_connection.in_waiting > 0:
+                    line_bytes = serial_connection.readline()
+                    if line_bytes:
+                        line = line_bytes.decode('utf-8').strip()
+                        match_x = x_pattern.search(line)
+                        match_y = y_pattern.search(line)
+                        match_temp = temp_pattern.search(line)
+                        match_hum = hum_pattern.search(line)
+                        match_pres = pres_pattern.search(line)
+                        
+                        if match_x and match_y:
+                            x = float(match_x.group(1))
+                            y = float(match_y.group(1))
+                            root.after(0, lambda: (x_data_scatter.append(x), y_data_scatter.append(y), 
+                                                   x_data_stats.append(x), y_data_stats.append(y)))
+                        if match_temp:
+                            temp = float(match_temp.group(1))
+                            root.after(0, lambda: temp_data.append(temp))
+                        if match_hum:
+                            hum = float(match_hum.group(1))
+                            root.after(0, lambda: hum_data.append(hum))
+                        if match_pres:
+                            pres = float(match_pres.group(1))
+                            root.after(0, lambda: pres_data.append(pres))
+                            
+                        last_data_timestamp = time.time()
+                time.sleep(0.01)
+            else:
+                time.sleep(1)
+                setup_serial_connection()
+        except serial.SerialException:
+            plotting_active = False
+            break
+        except Exception:
+            plotting_active = False
+            break
 
-            while receiving_data:
-                try:
-                    chunk = s.recv(buffer_size).decode('utf-8')
-                    if not chunk:
-                        print("Conexión con ESP32 cerrada inesperadamente.")
-                        break
+def simulate_data():
+    """Simulates wireless data reception for all plots."""
+    global plotting_active, last_data_timestamp, data_source
+    if not plotting_active or data_source != "simulation":
+        return
 
-                    buffer += chunk
+    # Generate random data for all plots
+    x_sim = random.uniform(-1000, 1000)
+    y_sim = random.uniform(-1000, 1000)
+    temp_sim = random.uniform(20, 30)
+    hum_sim = random.uniform(50, 70)
+    pres_sim = random.uniform(90, 110)
+    
+    # Add simulated data to the queues
+    root.after(0, lambda: (x_data_scatter.append(x_sim), y_data_scatter.append(y_sim),
+                           x_data_stats.append(x_sim), y_data_stats.append(y_sim),
+                           temp_data.append(temp_sim), hum_data.append(hum_sim),
+                           pres_data.append(pres_sim)))
+    last_data_timestamp = time.time()
+    
+    # Schedule the next simulation call
+    root.after(50, simulate_data)
 
-                    while "\n" in buffer:
-                        line_data, buffer = buffer.split('\n', 1)
-                        data_to_process = line_data.strip()
-
-                        if data_to_process.startswith("LIDAR_DATA_TCP:"):
-                            parts_str = data_to_process[len("LIDAR_DATA_TCP:"):].strip()
-                            parts = parts_str.split(',')
-                            parsed_data = {}
-                            for part in parts:
-                                if ':' in part:
-                                    key, value = part.split(':', 1)
-                                    parsed_data[key.strip()] = value.strip()
-
-                            try:
-                                coord_x = float(parsed_data.get('X', '0.0'))
-                                coord_y = float(parsed_data.get('Y', '0.0'))
-
-                                if not first_data_received_flag:
-                                    x_data.clear()
-                                    y_data.clear()
-                                    first_data_received_flag = True
-                                    print("Mapa reiniciado después de la primera coordenada válida.")
-
-                                x_data.append(coord_x)
-                                y_data.append(coord_y)
-
-                            except ValueError as e:
-                                print(f"Error al parsear datos numéricos: {e} - Datos RAW: {data_to_process}")
-                            except KeyError as e:
-                                print(f"Error: clave esperada no encontrada: {e} - Datos RAW: {data_to_process}")
-                        else:
-                            print(f"Mensaje no reconocido: {data_to_process}")
-
-                except socket.error as e:
-                    print(f"Error de socket durante la recepción: {e}")
-                    break
-                except Exception as e:
-                    print(f"Error inesperado al recibir datos: {e}")
-                    break
-
-    except ConnectionRefusedError:
-        print("Conexión rechazada. Asegúrate de que el ESP32 (Estación Base) esté encendido, conectado al Wi-Fi, y la IP sea correcta.")
-        if last_x_val:
-            last_x_val.set("X: ERROR")
-            last_y_val.set("Y: ERROR")
-    except socket.timeout:
-        print("Tiempo de espera agotado al intentar conectar.")
-        if last_x_val:
-            last_x_val.set("X: TIMEOUT")
-            last_y_val.set("Y: TIMEOUT")
-    except Exception as e:
-        print(f"Error al intentar conectar: {e}")
-        if last_x_val:
-            last_x_val.set("X: ERROR")
-            last_y_val.set("Y: ERROR")
-    finally:
-        receiving_data = False
-        print("Hilo de recepción de datos TCP finalizado.")
 
 def on_closing():
-    global receiving_data
-    receiving_data = False
-    if data_thread.is_alive():
-        data_thread.join(timeout=1)
+    global plotting_active, serial_connection
+    plotting_active = False
+    if 'data_thread' in globals() and data_thread.is_alive():
+        data_thread.join(timeout=2)
+    if serial_connection and serial_connection.is_open:
+        try:
+            serial_connection.close()
+        except Exception:
+            pass
     root.destroy()
     plt.close('all')
+    sys.exit(0)
 
-def place_panels_on_canvas():
-    global top_panel, bottom_panel
+def capture_and_clear_map_data():
+    global x_data_scatter, y_data_scatter
+    fig_scatter.savefig(MAP_PREVIEW_PATH, facecolor=fig_scatter.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
+    messagebox.showinfo("Captura de Mapa", "Se ha guardado un mapa de los puntos actuales.")
+    display_map_preview()
+    x_data_scatter.clear()
+    y_data_scatter.clear()
+    root.after(0, update_gui_elements)
 
-    canvas_width = root.winfo_width()
-    canvas_height = root.winfo_height()
-
-    if canvas_width < 100 or canvas_height < 100:
-        root.after(100, place_panels_on_canvas)
-        return
-
-    margin_top = 10
-    margin_sides = 10
-    margin_bottom = 50
-
-    available_width = canvas_width - 2 * margin_sides
-    available_height = canvas_height - margin_top - margin_bottom
-
-    if available_width < 0: available_width = 0
-    if available_height < 0: available_height = 0
-
-    bottom_panel_height = 50
-    top_panel_height = available_height - bottom_panel_height
-
-    top_panel.place(x=margin_sides, y=margin_top,
-                    width=available_width, height=top_panel_height)
-    top_panel.grid_rowconfigure(0, weight=1)
-    top_panel.grid_columnconfigure(0, weight=1)
-
-    bottom_panel.place(x=margin_sides, y=margin_top + top_panel_height,
-                        width=available_width, height=bottom_panel_height)
-
-    bottom_panel.grid_columnconfigure(0, weight=0)
-    bottom_panel.grid_columnconfigure(1, weight=0)
-    bottom_panel.grid_columnconfigure(2, weight=1)
-
-    for i in range(len(map_configurations)):
-        bottom_panel.grid_columnconfigure(3 + i, weight=0)
-
-    bottom_panel.grid_columnconfigure(3 + len(map_configurations), weight=0)
-
-    bottom_panel.grid_rowconfigure(0, weight=1)
-
-def switch_map_config(map_index):
-    global current_map_index, first_data_received_flag
-    if map_index < 0 or map_index >= len(map_configurations):
-        print(f"Error: Índice de mapa {map_index} fuera de rango.")
-        return
-
-    current_map_index = map_index
-    print(f"Cambiando a mapa: {map_configurations[current_map_index]['name']}")
-
-    x_data.clear()
-    y_data.clear()
-    first_data_received_flag = False
-
-    setup_matplotlib_plot_config()
-    update_plot(None)
-
-def take_screenshot_and_clean_map():
-    global x_data, y_data, first_data_received_flag
-
-    timestamp = int(time.time())
-    random_id = random.randint(1000, 9999)
-    filename = os.path.join(CAPS, f"catra_map_{timestamp}_{random_id}.png")
-
-    try:
-        fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor=fig.get_facecolor())
-        print(f"Captura de pantalla guardada en: {filename}")
-    except Exception as e:
-        print(f"Error al guardar la captura de pantalla: {e}")
-
-    x_data.clear()
-    y_data.clear()
-    first_data_received_flag = False
-    print("Mapa limpiado.")
-    update_plot(None)
+def check_data_flow():
+    global last_data_timestamp, serial_status_var, data_source
+    if plotting_active:
+        current_time = time.time()
+        # Only check timeout if we are in serial mode
+        if data_source == "serial" and (current_time - last_data_timestamp) > DATA_TIMEOUT_SECONDS:
+            if x_data_scatter or y_data_scatter:
+                x_data_scatter.clear()
+                y_data_scatter.clear()
+                root.after(0, update_gui_elements)
+                serial_status_var.set("Estado: Conectado (Sin Datos)")
+        root.after(200, check_data_flow)
 
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Monitor LIDAR de Robot C.A.T.R.A.")
-    root.geometry("1200x900")
-    root.minsize(800, 600)
+    root.geometry("1400x700")
+    root.minsize(1000, 600)
     root.protocol("WM_DELETE_WINDOW", on_closing)
-    root.configure(bg=WHITE_BACKGROUND_COLOR)
+    root.configure(bg=BG_COLOR_DARKEST)
 
     style = ttk.Style()
     style.theme_use('clam')
+    style.configure("TFrame", background=BG_COLOR_DARKEST)
+    style.configure("TLabel", background=BG_COLOR_DARKEST, foreground=TEXT_COLOR)
+    style.configure("Panel.TFrame", background=PANEL_COLOR, borderwidth=1, relief="flat")
+    style.configure("PanelTitle.TLabel", background=PANEL_COLOR, foreground=TEXT_COLOR, font=('Segoe UI', 14, 'bold'))
+    style.configure("Button.TButton", background=BUTTON_BG_COLOR, foreground=BUTTON_FG_COLOR, font=('Segoe UI', 10, 'bold'), borderwidth=0, relief="flat")
+    style.configure("Status.TLabel", background=BG_COLOR_DARKEST, foreground='#2ECC71', font=('Segoe UI', 12, 'bold'))
+    style.configure("Coord.TLabel", background=PANEL_COLOR, foreground=TEXT_COLOR, font=('Consolas', 18), padding=(5, 5))
 
-    style.configure("TFrame", background=WHITE_BACKGROUND_COLOR, foreground="black")
-    style.configure("TLabel", background=WHITE_BACKGROUND_COLOR, foreground="black", font=('Segoe UI', 11))
-    style.configure("TButton", background="#DDDDDD", foreground="black", font=('Segoe UI', 10, 'bold'),
-                    focuscolor="#CCCCCC", borderwidth=0, relief="flat")
-    style.map("TButton", background=[('active', '#EEEEEE'), ('pressed', '#BBBBBB')])
+    main_frame = ttk.Frame(root, style="TFrame", padding=10)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+    
+    # Configure grid for horizontal layout
+    main_frame.grid_columnconfigure(0, weight=1, minsize=600)
+    main_frame.grid_columnconfigure(1, weight=1, minsize=400)
+    main_frame.grid_rowconfigure(0, weight=1)
 
-    style.configure("DataPanel.TFrame", background=WHITE_BACKGROUND_COLOR, relief="flat", borderwidth=0)
+    # Left Panel: LIDAR plots
+    lidar_panel_left = ttk.Frame(main_frame, style="Panel.TFrame", padding=10)
+    lidar_panel_left.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    lidar_panel_left.grid_rowconfigure(0, weight=1)
+    lidar_panel_left.grid_rowconfigure(1, weight=1)
+    lidar_panel_left.grid_columnconfigure(0, weight=1)
 
-    style.configure("CoordLabels.TLabel",
-                    background=WHITE_BACKGROUND_COLOR,
-                    foreground="black",
-                    font=('Consolas', 18, 'bold'),
-                    padding=(5, 5))
+    # Top-left: Real-time LIDAR plot
+    lidar_stats_frame = ttk.Frame(lidar_panel_left, style="Panel.TFrame", padding=10)
+    lidar_stats_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+    ttk.Label(lidar_stats_frame, text="Real Time", style="PanelTitle.TLabel").pack(anchor="nw")
+    setup_stats_plot_config()
+    canvas_stats = FigureCanvasTkAgg(fig_stats, master=lidar_stats_frame)
+    canvas_stats.get_tk_widget().pack(fill=tk.BOTH, expand=True, anchor='center', pady=(10, 0))
 
-    top_panel = tk.Frame(root, bg="white", relief="flat", bd=0)
-    bottom_panel = ttk.Frame(root, style="DataPanel.TFrame")
+    # Bottom-left: Completed Map
+    map_panel_left = ttk.Frame(lidar_panel_left, style="Panel.TFrame", padding=10)
+    map_panel_left.grid(row=1, column=0, sticky="nsew", pady=5)
+    ttk.Label(map_panel_left, text="Completed Map", style="PanelTitle.TLabel").pack(anchor="nw")
+    map_preview_label = ttk.Label(map_panel_left, background=PANEL_COLOR, anchor="center",
+                                  text="No hay mapa previo guardado.", foreground=MUTED_TEXT_COLOR,
+                                  font=('Segoe UI', 12, 'italic'), relief="solid", borderwidth=1)
+    map_preview_label.pack(fill=tk.BOTH, expand=True, anchor='center', padx=10, pady=10)
 
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=100)
-    line, = ax.plot([], [], 'o')
-
-    setup_matplotlib_plot_config()
-
-    canvas_matplotlib = FigureCanvasTkAgg(fig, master=top_panel)
-    canvas_widget = canvas_matplotlib.get_tk_widget()
-    canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=0, pady=0)
-
-    last_x_val = tk.StringVar(root, value="X: ---")
-    last_y_val = tk.StringVar(root, value="Y: ---")
-
-    ttk.Label(bottom_panel, textvariable=last_x_val, style="CoordLabels.TLabel", anchor="w").grid(row=0, column=0, sticky="w", padx=(20, 5), pady=5)
-    ttk.Label(bottom_panel, textvariable=last_y_val, style="CoordLabels.TLabel", anchor="w").grid(row=0, column=1, sticky="w", padx=5, pady=5)
-
-    map_button_frame = ttk.Frame(bottom_panel, style="DataPanel.TFrame")
-    map_button_frame.grid(row=0, column=2, sticky="w", padx=(10, 20), pady=5)
-
-    for i, config in enumerate(map_configurations):
-        ttk.Button(map_button_frame, text=config["name"], command=lambda idx=i: switch_map_config(idx)).pack(side=tk.LEFT, padx=5)
-
-    clean_button_frame = ttk.Frame(bottom_panel, style="DataPanel.TFrame")
-    clean_button_frame.grid(row=0, column=3, sticky="e", padx=(10, 20), pady=5)
-    ttk.Button(clean_button_frame, text="Limpiar Mapa y Capturar", command=take_screenshot_and_clean_map).pack(side=tk.RIGHT, padx=5)
-
-    data_thread = threading.Thread(target=receive_from_esp32, daemon=True)
+    # Right Panel: Sensor plots
+    sensor_panel_right = ttk.Frame(main_frame, style="Panel.TFrame", padding=10)
+    sensor_panel_right.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+    ttk.Label(sensor_panel_right, text="Real Time", style="PanelTitle.TLabel").pack(anchor="nw")
+    
+    setup_sensor_plots()
+    canvas_sensors = FigureCanvasTkAgg(fig_sensors, master=sensor_panel_right)
+    canvas_sensors.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+    
+    # Bottom Control Panel
+    bottom_control_panel = ttk.Frame(root, style="TFrame", padding=10)
+    bottom_control_panel.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    serial_status_var = tk.StringVar(value="Estado: Desconectado")
+    status_label_widget = ttk.Label(bottom_control_panel, textvariable=serial_status_var, style="Status.TLabel")
+    status_label_widget.pack(side=tk.LEFT)
+    
+    capture_button = ttk.Button(bottom_control_panel, text="Capturar y Limpiar", command=capture_and_clear_map_data, style="Button.TButton")
+    capture_button.pack(side=tk.RIGHT)
+    
+    data_thread = threading.Thread(target=receive_from_serial, daemon=True)
     data_thread.start()
 
-    ani = animation.FuncAnimation(fig, update_plot, interval=10, cache_frame_data=False)
-
-    root.bind("<Configure>", lambda event: place_panels_on_canvas())
-    root.after(100, place_panels_on_canvas)
+    root.after(50, update_gui_elements)
+    root.after(200, check_data_flow)
+    root.after(300, display_map_preview)
 
     root.mainloop()
-
-    print("\nCerrando la aplicación...")
-    if data_thread.is_alive():
-        data_thread.join(timeout=1)
-    print("Programa Python terminado.")
