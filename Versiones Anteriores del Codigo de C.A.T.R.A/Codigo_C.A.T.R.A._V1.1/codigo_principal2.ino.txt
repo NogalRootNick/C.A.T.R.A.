@@ -1,0 +1,360 @@
+// Include necessary libraries
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
+#include <SPI.h>
+#include <RF24.h> // Asegúrate que esta librería es compatible con ESP32 y los pines elegidos
+
+// Declare Servo object for LIDAR
+Servo LIDAR;
+
+// Declare Adafruit VL53L0X sensor objects
+Adafruit_VL53L0X loxFront = Adafruit_VL53L0X();
+Adafruit_VL53L0X loxLeft = Adafruit_VL53L0X();
+Adafruit_VL53L0X loxRight = Adafruit_VL53L0X();
+Adafruit_VL53L0X loxInclined = Adafruit_VL53L0X();
+Adafruit_VL53L0X LIDARsensor = Adafruit_VL53L0X();
+
+// Define pin for controlling XSHUT of the LIDAR's VL53L0X sensor
+#define LIDAR_SHUT_PIN 6 // Asegúrate que este pin es adecuado para tu placa ESP32
+// Define sample size for median filter
+#define SAMPLE_SIZE 5
+
+// Define I2C address for motor driver
+#define I2C_ADDR 0x34 // Verifica esta dirección
+
+// Define register addresses for motor controller (ejemplo)
+#define ADC_BAT_ADDR 0x00
+#define MOTOR_TYPE_ADDR 0x14
+#define MOTOR_ENCODER_POLARITY_ADDR 0x15
+#define MOTOR_FIXED_PWM_ADDR 0x1F
+#define MOTOR_FIXED_SPEED_ADDR 0x33
+#define MOTOR_ENCODER_TOTAL_ADDR 0x3C
+
+// Define motor type (ejemplo)
+#define MOTOR_TYPE_JGB37_520_12V_110RPM 3
+
+unsigned long startTime;
+float totalRotationTime = 15000.0; // 15 segundos
+
+// Configure RF24 radio module (CE, CSN pins)
+// Asegúrate que estos pines son apropiados para tu placa ESP32 y el cableado del módulo RF24
+RF24 radio(5, 4); // Ejemplo: GPIO5 para CE, GPIO4 para CSN
+const byte address[6] = "00001"; // Dirección del pipe de radio
+
+// Variables para comandos de control de motor
+uint8_t car_forward[4] = {0, 23, 0, (uint8_t)-23};
+uint8_t car_turnleft[4] = {0, 20, 0, 20};
+uint8_t car_stop[4] = {0, 0, 0, 0};
+
+// Variables globales para configuración de motor
+uint8_t MotorType = MOTOR_TYPE_JGB37_520_12V_110RPM;
+uint8_t MotorEncoderPolarity = 0;
+
+/**
+ * @brief Reads distance from a VL53L0X sensor.
+ * @param lox Reference to the Adafruit_VL53L0X sensor object.
+ * @return Distance in millimeters, or -1 if an error occurred.
+ */
+int readVL53L0X(Adafruit_VL53L0X &lox) {
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false); // false: modo bloqueante
+
+  if (measure.RangeStatus != 4) { // Status 4 indica error
+    return measure.RangeMilliMeter;
+  } else {
+    return -1; // Error en la medición
+  }
+}
+
+/**
+ * @brief Writes an array of data to an I2C device.
+ * @param reg The register address to start writing to.
+ * @param val Pointer to the array of bytes to write.
+ * @param len The number of bytes to write.
+ * @return true if write was successful (ACK received), false otherwise.
+ */
+bool WireWriteDataArray(uint8_t reg, uint8_t *val, unsigned int len) {
+  unsigned int i;
+  Wire.beginTransmission(I2C_ADDR);
+  Wire.write(reg);
+  for (i = 0; i < len; i++) {
+    Wire.write(val[i]);
+  }
+  if (Wire.endTransmission() != 0) {
+    return false; // NACK recibido
+  }
+  return true; // ACK recibido
+}
+
+/**
+ * @brief Setup function, runs once at startup.
+ */
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(); // Pines I2C por defecto en ESP32: GPIO21 (SDA), GPIO22 (SCL)
+
+  LIDAR.attach(9); // Asegúrate que el pin 9 es PWM en tu ESP32
+
+  // Configurar controlador de motor vía I2C
+  if (!WireWriteDataArray(MOTOR_TYPE_ADDR, &MotorType, 1)) {
+    Serial.println(F("Fallo al configurar tipo de motor"));
+  }
+  delay(5);
+  if (!WireWriteDataArray(MOTOR_ENCODER_POLARITY_ADDR, &MotorEncoderPolarity, 1)) {
+    Serial.println(F("Fallo al configurar polaridad del encoder"));
+  }
+
+  pinMode(LIDAR_SHUT_PIN, OUTPUT);
+  digitalWrite(LIDAR_SHUT_PIN, LOW); // Mantener apagado inicialmente
+
+  Serial.println(F("Iniciando sensores VL53L0X..."));
+
+  // Inicializar sensores VL53L0X con sus direcciones I2C
+  // Nota: Los sensores VL53L0X por defecto usan 0x29. Se necesita un método para cambiar direcciones
+  // si se usan múltiples en el mismo bus I2C (ej. controlando pines XSHUT secuencialmente).
+  if (!loxFront.begin(0x30)) {
+    Serial.println(F("Error al iniciar VL53L0X Frontal"));
+    while (1);
+  }
+  Serial.println(F("VL53L0X Frontal iniciado"));
+
+  if (!loxLeft.begin(0x31)) {
+    Serial.println(F("Error al iniciar VL53L0X Izquierdo"));
+    while (1);
+  }
+  Serial.println(F("VL53L0X Izquierdo iniciado"));
+
+  if (!loxRight.begin(0x32)) {
+    Serial.println(F("Error al iniciar VL53L0X Derecho"));
+    while (1);
+  }
+  Serial.println(F("VL53L0X Derecho iniciado"));
+
+  if (!loxInclined.begin(0x33)) {
+    Serial.println(F("Error al iniciar VL53L0X Inclinado"));
+    while (1);
+  }
+  Serial.println(F("VL53L0X Inclinado iniciado"));
+
+  // Inicializar módulo de radio RF24
+  if (!radio.begin()) {
+    Serial.println(F("Hardware de Radio no responde!!"));
+    while (1);
+  }
+  radio.openWritingPipe(address);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.stopListening(); // Configurar como transmisor
+  Serial.println(F("Radio RF24 iniciada como transmisor."));
+}
+
+/**
+ * @brief Applies a median filter to an array of readings.
+ * @param readings Array of integer readings.
+ * @param size The number of readings in the array.
+ * @return The median value of the readings.
+ */
+int filterMedian(int readings[], int size) {
+  int sorted[size];
+  memcpy(sorted, readings, size * sizeof(int)); // Copiar para ordenar
+
+  // Bubble sort simple
+  for (int i = 0; i < size - 1; i++) {
+    for (int j = i + 1; j < size; j++) {
+      if (sorted[i] > sorted[j]) {
+        int temp = sorted[i];
+        sorted[i] = sorted[j];
+        sorted[j] = temp;
+      }
+    }
+  }
+  return sorted[size / 2]; // Elemento central
+}
+
+/**
+ * @brief Moves the robot forward.
+ */
+void moveForward() {
+  Serial.println("Comando: Mover Adelante");
+  if (!WireWriteDataArray(MOTOR_FIXED_SPEED_ADDR, car_forward, sizeof(car_forward))) {
+    Serial.println(F("Fallo al enviar comando mover adelante"));
+  }
+}
+
+/**
+ * @brief Stops the robot's motors.
+ */
+void stopMotors() {
+  Serial.println("Comando: Detener Motores");
+  if (!WireWriteDataArray(MOTOR_FIXED_SPEED_ADDR, car_stop, sizeof(car_stop))) {
+    Serial.println(F("Fallo al enviar comando detener motores"));
+  }
+}
+
+/**
+ * @brief Turns the robot left.
+ */
+void turnLeft() {
+  Serial.println("Comando: Girar Izquierda");
+  if (!WireWriteDataArray(MOTOR_FIXED_SPEED_ADDR, car_turnleft, sizeof(car_turnleft))) {
+    Serial.println(F("Fallo al enviar comando girar izquierda"));
+  }
+}
+
+/**
+ * @brief Turns the robot right.
+ * Placeholder - necesita implementación.
+ */
+void turnRight() {
+  Serial.println("Comando: Girar Derecha (No implementado completamente)");
+  // Ejemplo: definir car_turnright y usar WireWriteDataArray
+}
+
+/**
+ * @brief Scans the environment using the LIDAR setup (servo + VL53L0X).
+ */
+void scanWithLidar() {
+  Serial.println("Iniciando escaneo LIDAR...");
+  digitalWrite(LIDAR_SHUT_PIN, HIGH); // Encender sensor VL53L0X del LIDAR
+  delay(150); // Esperar que el sensor inicie
+
+  // Inicializar sensor VL53L0X del LIDAR (usa dirección I2C por defecto 0x29)
+  if (!LIDARsensor.begin()) {
+    Serial.println(F("Fallo al iniciar sensor VL53L0X del LIDAR!"));
+    digitalWrite(LIDAR_SHUT_PIN, LOW); // Apagar si falla la inicialización
+    return;
+  }
+  Serial.println(F("Sensor VL53L0X del LIDAR iniciado para escaneo."));
+
+  // LIDAR.write(80); // Esto fija una posición. Para un barrido, iterar ángulos.
+  startTime = millis();
+
+  // Bucle para rotación temporizada. Para un barrido real, el ángulo del servo debe actualizarse aquí.
+  while (millis() - startTime < totalRotationTime) {
+    unsigned long elapsedTime = millis() - startTime;
+    // Calcular ángulo actual basado en tiempo (conceptual si el servo no barre activamente)
+    float currentAngle = map(elapsedTime, 0, totalRotationTime, 0, 180); // Ejemplo: mapear a 0-180 grados
+    // Para un barrido real:
+    // int servoAngle = map(elapsedTime, 0, totalRotationTime, 0, 180);
+    // LIDAR.write(servoAngle);
+    // delay(20); // Delay para posicionamiento y medición
+
+    int distance = -1;
+    VL53L0X_RangingMeasurementData_t measure;
+    LIDARsensor.rangingTest(&measure, false);
+
+    if (measure.RangeStatus != 4) {
+      distance = measure.RangeMilliMeter;
+      Serial.print("Angulo (aprox): ");
+      Serial.print(currentAngle);
+      Serial.print(" deg, Distancia: ");
+      Serial.println(distance);
+    } else {
+      Serial.println("LIDAR VL53L0X: Timeout o medición inválida!");
+      distance = -1;
+    }
+
+    // Transmitir datos LIDAR (ángulo y distancia) por radio
+    uint16_t angle_tx = (uint16_t)(currentAngle * 10); // Ejemplo: ángulo en incrementos de 0.1 grado
+    uint16_t distance_tx = (uint16_t)distance;
+
+    byte data_payload[4];
+    data_payload[0] = lowByte(angle_tx);
+    data_payload[1] = highByte(angle_tx);
+    data_payload[2] = lowByte(distance_tx);
+    data_payload[3] = highByte(distance_tx);
+
+    if (!radio.write(&data_payload, sizeof(data_payload))) {
+        Serial.println(F("Falló la transmisión de datos LIDAR"));
+    }
+    delay(50); // Delay entre mediciones/transmisiones
+  }
+
+  LIDAR.write(90); // Posición neutral del servo (opcional)
+  digitalWrite(LIDAR_SHUT_PIN, LOW); // Apagar sensor VL53L0X del LIDAR
+  Serial.println(F("Sensor VL53L0X del LIDAR apagado. Escaneo completo."));
+  LIDARsensor.stopContinuous(); // Buena práctica
+}
+
+/**
+ * @brief Main loop, runs repeatedly.
+ */
+void loop() {
+  int distanceFront_raw = readVL53L0X(loxFront);
+  int distanceLeft_raw = readVL53L0X(loxLeft);
+  int distanceRight_raw = readVL53L0X(loxRight);
+  int distanceInclined_raw = readVL53L0X(loxInclined);
+
+  static int front_readings[SAMPLE_SIZE];
+  static int left_readings[SAMPLE_SIZE];
+  static int right_readings[SAMPLE_SIZE];
+  static int reading_index = 0;
+
+  front_readings[reading_index] = distanceFront_raw;
+  left_readings[reading_index] = distanceLeft_raw;
+  right_readings[reading_index] = distanceRight_raw;
+  reading_index = (reading_index + 1) % SAMPLE_SIZE;
+
+  int front = filterMedian(front_readings, SAMPLE_SIZE);
+  int left = filterMedian(left_readings, SAMPLE_SIZE);
+  int right = filterMedian(right_readings, SAMPLE_SIZE);
+  int inclined = distanceInclined_raw; // Sensor inclinado leído directamente
+
+  Serial.print("Front: "); Serial.print(front); Serial.print(" mm");
+  Serial.print(", Left: "); Serial.print(left); Serial.print(" mm");
+  Serial.print(", Right: "); Serial.print(right); Serial.print(" mm");
+  Serial.print(", Inclined: "); Serial.print(inclined); Serial.println(" mm");
+
+  // Algoritmo básico de evasión de obstáculos
+  const int FRONT_THRESHOLD = 200; // 20 cm
+  const int SIDE_THRESHOLD = 150;  // 15 cm
+
+  if (front != -1 && front < FRONT_THRESHOLD) {
+    stopMotors();
+    Serial.print("Obstaculo ADELANTE! Dist: "); Serial.println(front);
+    if (left != -1 && right != -1) {
+        if (left > right) {
+            turnLeft();
+            Serial.println("Accion: Girando IZQUIERDA");
+        } else {
+            turnRight();
+            Serial.println("Accion: Girando DERECHA");
+        }
+    } else if (left != -1 && left > SIDE_THRESHOLD) {
+        turnLeft();
+        Serial.println("Accion: Girando IZQUIERDA (sensor derecho error/muy cerca)");
+    } else if (right != -1 && right > SIDE_THRESHOLD) {
+        turnRight();
+        Serial.println("Accion: Girando DERECHA (sensor izquierdo error/muy cerca)");
+    } else {
+        Serial.println("Accion: Adelante bloqueado, lados no claros/bloqueados. Reversa (no implementado).");
+        // reverseMotors(); delay(500); turnLeft(); // Ejemplo
+    }
+  } else if (left != -1 && left < SIDE_THRESHOLD) {
+    stopMotors();
+    Serial.print("Obstaculo IZQUIERDA! Dist: "); Serial.println(left);
+    turnRight();
+    Serial.println("Accion: Girando DERECHA");
+  } else if (right != -1 && right < SIDE_THRESHOLD) {
+    stopMotors();
+    Serial.print("Obstaculo DERECHA! Dist: "); Serial.println(right);
+    turnLeft();
+    Serial.println("Accion: Girando IZQUIERDA");
+  } else {
+    moveForward();
+    Serial.println("Accion: Moviendo ADELANTE");
+  }
+
+  delay(100); // Pequeño delay antes del siguiente ciclo de decisión
+
+  // Realizar escaneo LIDAR periódicamente
+  static unsigned long lastLidarScanTime = 0;
+  unsigned long lidarScanInterval = 20000; // Escanear cada 20 segundos (ejemplo)
+
+  if (millis() - lastLidarScanTime > lidarScanInterval) {
+    stopMotors(); // Detener movimiento antes de escanear
+    delay(200);   // Tiempo para estabilizar
+    scanWithLidar();
+    lastLidarScanTime = millis();
+  }
+}
